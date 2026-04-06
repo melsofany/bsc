@@ -5,9 +5,10 @@ import {
   opportunitiesTable,
   tradesTable,
 } from "@workspace/db";
-import { eq, desc, and } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 import { simulateArbitrage, executeArbitrageLive } from "./executor.js";
 import { fetchDexPairsForToken, detectArbitrageFromPairs, fetchCoinGeckoPrices } from "./prices.js";
+import { scanOnChainOpportunities, updateTokenPrices } from "./onchain.js";
 import { fetchBscGasPrice } from "./blockchain.js";
 import { logger } from "./logger.js";
 
@@ -25,50 +26,88 @@ async function getBotConfig() {
   return rows[0] ?? null;
 }
 
+// Extra tokens for DexScreener API scanner (supplemental to on-chain scanner)
+const DEXSCREENER_TOKENS = [
+  "WBNB", "BTCB", "ETH", "CAKE",
+  "XVS", "ALPACA", "BSW", "BAKE",
+  "ADA", "DOT", "LINK", "LTC",
+];
+
 async function scanForOpportunities() {
   try {
     const state = await getBotState();
     if (!state?.running) return;
 
-    logger.info("Auto-trader: scanning for new opportunities");
+    logger.info("Auto-trader: scanning for new opportunities (on-chain + API)");
 
-    const [wbnbPairs, btcbPairs, cakePairs, ethPairs, gasPrice, cgPrices] = await Promise.all([
-      fetchDexPairsForToken("WBNB"),
-      fetchDexPairsForToken("BTCB"),
-      fetchDexPairsForToken("CAKE"),
-      fetchDexPairsForToken("ETH"),
-      fetchBscGasPrice(),
+    const [cgPrices, gasPrice] = await Promise.all([
       fetchCoinGeckoPrices(),
+      fetchBscGasPrice(),
     ]);
 
-    const allPairs = [...wbnbPairs, ...btcbPairs, ...cakePairs, ...ethPairs];
     const bnbPrice = cgPrices["BNB"] ?? cgPrices["WBNB"] ?? 600;
-    const opportunities = detectArbitrageFromPairs(allPairs, gasPrice, bnbPrice);
 
-    if (opportunities.length > 0) {
-      const toInsert = opportunities.slice(0, 6).map((op) => ({
-        strategy: op.strategy,
-        tokenPair: op.tokenPair,
-        buyDex: op.buyDex,
-        sellDex: op.sellDex,
-        buyPrice: op.buyPrice.toFixed(8),
-        sellPrice: op.sellPrice.toFixed(8),
-        profitEstimate: op.profitUsd.toFixed(4),
-        profitPercent: op.profitPercent.toFixed(4),
-        gasEstimate: op.gasEstimateUsd.toFixed(4),
-        netProfit: op.netProfitUsd.toFixed(4),
-        status: "detected" as const,
-        detectedAt: op.detectedAt,
-        amountIn: op.amountIn.toFixed(2),
-        flashLoanUsed: op.strategy === "flash_loan",
-      }));
+    // Keep on-chain scanner prices up-to-date
+    updateTokenPrices({
+      WBNB: cgPrices["WBNB"] ?? cgPrices["BNB"] ?? 600,
+      BTCB: cgPrices["BTCB"] ?? 65000,
+      ETH:  cgPrices["ETH"]  ?? 3000,
+      CAKE: cgPrices["CAKE"] ?? 2,
+      USDT: cgPrices["USDT"] ?? 1,
+      BUSD: cgPrices["BUSD"] ?? 1,
+    });
 
-      await db.insert(opportunitiesTable).values(toInsert).catch((e) => {
-        logger.warn(e, "Auto-trader: could not insert opportunities");
-      });
+    // Gas cost estimate for flash loan transactions (~380k gas @ current gas price)
+    const gasCostUsd = gasPrice * 380_000 * 1e-9 * bnbPrice;
 
-      logger.info({ count: toInsert.length }, "Auto-trader: inserted new opportunities");
-    }
+    // Run both scanners in parallel: on-chain (accurate) + DexScreener (broad)
+    const [onChainOpps, ...dexScreenerPairArrays] = await Promise.all([
+      scanOnChainOpportunities(bnbPrice, gasCostUsd),
+      ...DEXSCREENER_TOKENS.map((t) => fetchDexPairsForToken(t)),
+    ]);
+
+    const allDexPairs = dexScreenerPairArrays.flat();
+    const apiOpps = detectArbitrageFromPairs(allDexPairs, gasPrice, bnbPrice);
+
+    // Merge: on-chain results first (more accurate), then API results
+    // De-duplicate by tokenPair+buyDex+sellDex
+    const seen = new Set<string>();
+    const merged = [...onChainOpps, ...apiOpps].filter((op) => {
+      const key = `${op.tokenPair}|${op.buyDex}|${op.sellDex}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    logger.info(
+      { onChain: onChainOpps.length, api: apiOpps.length, merged: merged.length },
+      "Auto-trader: opportunities found"
+    );
+
+    if (merged.length === 0) return;
+
+    const toInsert = merged.slice(0, 10).map((op) => ({
+      strategy: op.strategy,
+      tokenPair: op.tokenPair,
+      buyDex: op.buyDex,
+      sellDex: op.sellDex,
+      buyPrice: op.buyPrice.toFixed(8),
+      sellPrice: op.sellPrice.toFixed(8),
+      profitEstimate: op.profitUsd.toFixed(4),
+      profitPercent: op.profitPercent.toFixed(4),
+      gasEstimate: op.gasEstimateUsd.toFixed(4),
+      netProfit: op.netProfitUsd.toFixed(4),
+      status: "detected" as const,
+      detectedAt: op.detectedAt,
+      amountIn: op.amountIn.toFixed(2),
+      flashLoanUsed: op.strategy === "flash_loan",
+    }));
+
+    await db.insert(opportunitiesTable).values(toInsert).catch((e) => {
+      logger.warn(e, "Auto-trader: could not insert opportunities");
+    });
+
+    logger.info({ count: toInsert.length }, "Auto-trader: inserted new opportunities");
   } catch (err) {
     logger.warn(err, "Auto-trader: scan failed");
   }
@@ -126,7 +165,6 @@ async function executeDetectedOpportunities() {
         const tradeStatus = result.success ? "confirmed" : "failed";
         const executedAt = new Date();
 
-        // Use real gas and profit from execution result
         const realGasCostUsd = result.gasCostUsd ? parseFloat(result.gasCostUsd) : 0;
         const realProfitUsd = result.profitUsd ? parseFloat(result.profitUsd) : 0;
         const realNetProfitUsd = (realProfitUsd - realGasCostUsd).toFixed(4);
@@ -137,8 +175,9 @@ async function executeDetectedOpportunities() {
             status: result.success ? "executed" : "failed",
             executedAt,
             txHash: result.txHash ?? null,
-            // Update the opportunity with actual data
-            gasEstimate: result.gasUsed ? (parseFloat(result.gasUsed) * 0.00000000005 * 600).toFixed(4) : opportunity.gasEstimate,
+            gasEstimate: result.gasUsed
+              ? (parseFloat(result.gasUsed) * 0.00000000005 * 600).toFixed(4)
+              : opportunity.gasEstimate,
             netProfit: realNetProfitUsd,
           })
           .where(eq(opportunitiesTable.id, opportunity.id));
@@ -184,10 +223,10 @@ export function startAutoTrader() {
   if (running) return;
   running = true;
 
-  logger.info("Auto-trader: starting opportunity scanner (manual execution only)");
+  logger.info("Auto-trader: starting opportunity scanner (on-chain + DexScreener)");
 
-  // Only scan for opportunities — execution is manual (user clicks Execute)
-  scanInterval = setInterval(scanForOpportunities, 30_000);
+  // Scan every 20s (on-chain scanner is fast enough for this cadence)
+  scanInterval = setInterval(scanForOpportunities, 20_000);
 }
 
 export function stopAutoTrader() {
