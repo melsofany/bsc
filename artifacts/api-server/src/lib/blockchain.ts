@@ -80,6 +80,21 @@ export async function fetchBscGasPrice(): Promise<number> {
   }
 }
 
+// Same as `fetchBscGasPrice()` but:
+// - returns `null` if gas price can't be verified (RPC/network failure)
+// This is required for "fail-closed" execution safety in the auto-trader.
+export async function fetchBscGasPriceOrNull(): Promise<number | null> {
+  try {
+    const hex = await rpcCall(BSC_RPC, "eth_gasPrice");
+    if (!hex || typeof hex !== "string") return null;
+    const wei = parseInt(hex, 16);
+    if (isNaN(wei) || wei <= 0) return null;
+    return Math.round(wei / 1e9 * 10) / 10;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchBscBlockNumber(): Promise<number> {
   try {
     const hex = await rpcCall(BSC_RPC, "eth_blockNumber");

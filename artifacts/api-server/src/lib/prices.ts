@@ -23,6 +23,22 @@ export interface ArbitrageOpportunity {
   detectedAt: Date;
 }
 
+// Minimum DEX liquidity to consider a pair (from DexScreener).
+// Higher values reduce slippage/volatility risk from thin pools.
+// You can override for testing by setting `MIN_DEX_LIQUIDITY_USD` env var.
+const DEFAULT_MIN_DEX_LIQUIDITY_USD = 100_000;
+const MIN_DEX_LIQUIDITY_USD = (() => {
+  const raw = process.env.MIN_DEX_LIQUIDITY_USD;
+  // Some users may set env vars using JS-like numeric separators, e.g. `100_000`.
+  // `parseFloat("100_000")` returns `100` (stops at `_`), so we normalize first.
+  const normalized = raw
+    ? raw.trim().replace(/_/g, "").replace(/,/g, "")
+    : undefined;
+  const n = normalized ? Number.parseFloat(normalized) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MIN_DEX_LIQUIDITY_USD;
+})();
+const MIN_NET_PROFIT_USD_API = 0.05;
+
 const DEX_NAME_MAP: Record<string, string> = {
   pancakeswap:              "PancakeSwap V2",
   "pancakeswap-v3":         "PancakeSwap V3",
@@ -131,7 +147,7 @@ export async function fetchDexPairsForToken(tokenSymbol: string): Promise<DexPai
       // Skip DEXes identified only by contract address (unnamed/unknown DEXes)
       if (isEthAddress(p.dexId)) continue;
       const liquidity = p.liquidity?.usd ?? 0;
-      if (liquidity < 100000) continue;
+      if (liquidity < MIN_DEX_LIQUIDITY_USD) continue;
 
       const priceUsd = parseFloat(p.priceUsd);
       if (isNaN(priceUsd) || priceUsd <= 0) continue;
@@ -267,9 +283,9 @@ export function detectArbitrageFromPairs(
         const gasEstimateUsd = strategy === "flash_loan" ? gasCostFlashLoan : gasCostCrossDex;
         const netProfitUsd = profitAfterDexFees - gasEstimateUsd;
 
-        // Require at least a meaningful gross profit ($0.50) to avoid noise.
-        // The on-chain simulation will reject truly unprofitable trades.
+        // Require both gross and net profitability to avoid noisy false signals.
         if (rawProfitUsd < 0.5) continue;
+        if (netProfitUsd < MIN_NET_PROFIT_USD_API) continue;
 
         const quoteToken = ["USDT", "BUSD", "USDC"].includes(token) ? "WBNB" : "USDT";
         const tokenPairLabel = `${token}/${quoteToken}`;

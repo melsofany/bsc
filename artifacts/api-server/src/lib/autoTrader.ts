@@ -9,7 +9,7 @@ import { eq, desc } from "drizzle-orm";
 import { simulateArbitrage, executeArbitrageLive } from "./executor.js";
 import { fetchDexPairsForToken, detectArbitrageFromPairs, fetchCoinGeckoPrices } from "./prices.js";
 import { scanOnChainOpportunities, updateTokenPrices } from "./onchain.js";
-import { fetchBscGasPrice } from "./blockchain.js";
+import { fetchBscGasPrice, fetchBscGasPriceOrNull } from "./blockchain.js";
 import { logger } from "./logger.js";
 
 let running = false;
@@ -117,6 +117,39 @@ async function executeDetectedOpportunities() {
   try {
     const [state, config] = await Promise.all([getBotState(), getBotConfig()]);
     if (!state?.running || !config) return;
+    const minNetProfitUsd = Number.parseFloat(config.minProfitThresholdUsd ?? "0");
+    const maxGasPriceGwei = Number.parseFloat(config.maxGasPriceGwei ?? "0");
+    const maxPositionSizeUsd = Number.parseFloat(config.maxPositionSizeUsd ?? "0");
+
+    const thresholdMinNetProfitUsd = Number.isFinite(minNetProfitUsd) ? minNetProfitUsd : 0;
+    const thresholdMaxGasPriceGwei = Number.isFinite(maxGasPriceGwei) ? maxGasPriceGwei : 0;
+    const thresholdMaxPositionSizeUsd = Number.isFinite(maxPositionSizeUsd) ? maxPositionSizeUsd : 0;
+
+    // Fetch current gas price once per loop so all opportunities use the same market snapshot.
+    // We must fail-closed if gas price can't be verified and the user enabled a max-gas safeguard.
+    const currentGasPriceGwei = thresholdMaxGasPriceGwei > 0
+      ? await fetchBscGasPriceOrNull()
+      : await fetchBscGasPrice();
+
+    if (
+      thresholdMaxGasPriceGwei > 0 &&
+      currentGasPriceGwei !== null &&
+      currentGasPriceGwei > thresholdMaxGasPriceGwei
+    ) {
+      logger.info(
+        { currentGasPriceGwei, maxGasPriceGwei: thresholdMaxGasPriceGwei },
+        "Auto-trader: skipping execution loop due to high gas"
+      );
+      return;
+    }
+
+    if (thresholdMaxGasPriceGwei > 0 && currentGasPriceGwei === null) {
+      logger.warn(
+        { maxGasPriceGwei: thresholdMaxGasPriceGwei },
+        "Auto-trader: skipping execution because gas price couldn't be verified"
+      );
+      return;
+    }
 
     const detected = await db
       .select()
@@ -131,6 +164,53 @@ async function executeDetectedOpportunities() {
 
     for (const opportunity of detected) {
       try {
+        const netProfitUsd = Number.parseFloat(opportunity.netProfit ?? "0");
+
+        // `amountIn` is nullable in DB schema. We MUST NOT default it to 0 for
+        // size-check and to "10000" for execution; that would bypass
+        // `maxPositionSizeUsd` protection. Fail-closed when it's missing.
+        const amountInRaw = opportunity.amountIn;
+        if (!amountInRaw) {
+          logger.warn(
+            { opportunityId: opportunity.id },
+            "Auto-trader: skipping opportunity because amountIn is missing"
+          );
+          continue;
+        }
+
+        const amountInUsd = Number.parseFloat(amountInRaw);
+        if (!Number.isFinite(amountInUsd) || amountInUsd <= 0) {
+          logger.warn(
+            { opportunityId: opportunity.id, amountInRaw },
+            "Auto-trader: skipping opportunity because amountIn is invalid"
+          );
+          continue;
+        }
+
+        if (thresholdMinNetProfitUsd > 0 && netProfitUsd < thresholdMinNetProfitUsd) {
+          logger.info(
+            {
+              opportunityId: opportunity.id,
+              netProfitUsd,
+              minProfitThresholdUsd: thresholdMinNetProfitUsd,
+            },
+            "Auto-trader: skipping opportunity below min net profit threshold"
+          );
+          continue;
+        }
+
+        if (thresholdMaxPositionSizeUsd > 0 && amountInUsd > thresholdMaxPositionSizeUsd) {
+          logger.info(
+            {
+              opportunityId: opportunity.id,
+              amountInUsd,
+              maxPositionSizeUsd: thresholdMaxPositionSizeUsd,
+            },
+            "Auto-trader: skipping opportunity above max position size"
+          );
+          continue;
+        }
+
         const isLive = state.mode === "live" && config.mode === "live";
         const flashbotsEnabled = config.flashbotsEnabled ?? false;
         const network = state.network ?? config.network ?? "bsc";
@@ -138,6 +218,7 @@ async function executeDetectedOpportunities() {
         let result;
 
         if (isLive && state.walletPrivateKey && config.contractAddress) {
+          const flashLoanAmount = amountInRaw;
           result = await executeArbitrageLive({
             privateKey: state.walletPrivateKey,
             contractAddress: config.contractAddress,
@@ -145,10 +226,11 @@ async function executeDetectedOpportunities() {
             tokenPair: opportunity.tokenPair,
             buyDex: opportunity.buyDex ?? "pancakeswap_v2",
             sellDex: opportunity.sellDex ?? "biswap",
-            flashLoanAmount: opportunity.amountIn ?? "10000",
+            flashLoanAmount,
             flashbotsEnabled,
           });
         } else {
+          const flashLoanAmount = amountInRaw;
           result = await simulateArbitrage({
             tokenPair: opportunity.tokenPair,
             buyDex: opportunity.buyDex ?? "pancakeswap_v2",
@@ -157,7 +239,7 @@ async function executeDetectedOpportunities() {
             gasEstimate: opportunity.gasEstimate ?? "0",
             netProfit: opportunity.netProfit ?? "0",
             network,
-            flashLoanAmount: opportunity.amountIn ?? "10000",
+            flashLoanAmount,
             flashbotsEnabled,
           });
         }

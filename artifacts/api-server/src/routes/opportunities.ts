@@ -11,6 +11,7 @@ import { fetchDexPairsForToken, detectArbitrageFromPairs, fetchCoinGeckoPrices }
 import { fetchBscGasPrice } from "../lib/blockchain.js";
 
 const router: IRouter = Router();
+const LIVE_SCAN_TOKENS = ["WBNB", "BTCB", "CAKE", "ETH", "XVS", "ALPACA", "BSW", "BAKE", "ADA", "DOT", "LINK", "LTC"];
 
 function mapOpp(r: typeof opportunitiesTable.$inferSelect) {
   return {
@@ -66,16 +67,13 @@ router.get("/opportunities/live", async (req, res): Promise<void> => {
   try {
     const botRunning = await isBotRunning();
 
-    const [wbnbPairs, btcbPairs, cakePairs, ethPairs, gasPrice, cgPrices] = await Promise.all([
-      fetchDexPairsForToken("WBNB"),
-      fetchDexPairsForToken("BTCB"),
-      fetchDexPairsForToken("CAKE"),
-      fetchDexPairsForToken("ETH"),
+    const [pairArrays, gasPrice, cgPrices] = await Promise.all([
+      Promise.all(LIVE_SCAN_TOKENS.map((token) => fetchDexPairsForToken(token))),
       fetchBscGasPrice(),
       fetchCoinGeckoPrices(),
     ]);
 
-    const allPairs = [...wbnbPairs, ...btcbPairs, ...cakePairs, ...ethPairs];
+    const allPairs = pairArrays.flat();
     const bnbPrice = cgPrices["BNB"] ?? cgPrices["WBNB"] ?? 600;
     const opportunities = detectArbitrageFromPairs(allPairs, gasPrice, bnbPrice);
 
