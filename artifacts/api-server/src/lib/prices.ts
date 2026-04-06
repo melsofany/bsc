@@ -215,29 +215,49 @@ export function detectArbitrageFromPairs(
         const a = uniq[i]!;
         const b = uniq[j]!;
 
-        const priceDiff = Math.abs(a.priceNormalized - b.priceNormalized);
-        const avgPrice = (a.priceNormalized + b.priceNormalized) / 2;
-        const diffPct = (priceDiff / avgPrice) * 100;
-
-        if (diffPct < 0.05 || diffPct > 10) continue;
-
+        // In the flash-swap model:
+        //   BUY leg:  borrow tokenA → swap tokenA→tokenB at buyDex
+        //             want tokenA to be MOST valuable here → get most tokenB
+        //   SELL leg: swap tokenB→tokenA at sellDex to repay
+        //             want tokenA to be CHEAPEST here → get most tokenA back
+        //
+        // So: buyDex = DEX with HIGHER tokenA price, sellDex = DEX with LOWER tokenA price.
         const [buyDex, sellDex, buyPrice, sellPrice] =
-          a.priceNormalized < b.priceNormalized
+          a.priceNormalized > b.priceNormalized
             ? [a.dex, b.dex, a.priceNormalized, b.priceNormalized]
             : [b.dex, a.dex, b.priceNormalized, a.priceNormalized];
+
+        const priceDiff = buyPrice - sellPrice; // always positive
+        const diffPct = (priceDiff / sellPrice) * 100;
+
+        // Minimum spread needed to cover all fees:
+        //   flash loan fee: 0.25%
+        //   buy DEX swap fee: ~0.25–0.35%  (use 0.3% conservative)
+        //   sell DEX swap fee: ~0.25–0.35% (use 0.3% conservative)
+        //   total: ~0.85% — require 1.0% to have meaningful margin
+        if (diffPct < 1.0 || diffPct > 10) continue;
+
+        const FLASH_FEE    = 0.0025; // PancakeSwap flash loan
+        const DEX_FEE_EACH = 0.003;  // per swap leg (conservative)
+        const totalFeeRate = FLASH_FEE + DEX_FEE_EACH * 2; // 0.85%
 
         const maxLiquidity = Math.min(a.liquidity, b.liquidity);
         const tradeAmountUsd = Math.min(maxLiquidity * 0.02, 100000);
         const tokenAmount = tradeAmountUsd / buyPrice;
-        const rawProfitUsd = tokenAmount * (sellPrice - buyPrice);
+
+        // Gross profit (buyPrice > sellPrice → positive)
+        const rawProfitUsd = tokenAmount * (buyPrice - sellPrice);
+        // Subtract fee cost from the loan amount
+        const feesCostUsd  = tradeAmountUsd * totalFeeRate;
 
         const strategy: "cross_dex" | "flash_loan" =
           tradeAmountUsd > 20000 ? "flash_loan" : "cross_dex";
 
         const gasEstimateUsd = strategy === "flash_loan" ? gasCostFlashLoan : gasCostCrossDex;
-        const netProfitUsd = rawProfitUsd - gasEstimateUsd;
+        const profitAfterDexFees = rawProfitUsd - feesCostUsd;
+        const netProfitUsd = profitAfterDexFees - gasEstimateUsd;
 
-        if (netProfitUsd < 0.5) continue;
+        if (netProfitUsd < 1.0) continue;
 
         const quoteToken = ["USDT", "BUSD", "USDC"].includes(token) ? "WBNB" : "USDT";
         const tokenPairLabel = `${token}/${quoteToken}`;
@@ -252,7 +272,7 @@ export function detectArbitrageFromPairs(
           buyPrice,
           sellPrice,
           profitPercent: diffPct,
-          profitUsd: rawProfitUsd,
+          profitUsd: profitAfterDexFees,
           gasEstimateUsd,
           netProfitUsd,
           strategy,

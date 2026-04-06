@@ -75,16 +75,16 @@ router.post("/execute/:opportunityId", async (req, res): Promise<void> => {
       contractAddress: config.contractAddress,
       network: state.network,
       tokenPair: opportunity.tokenPair,
-      buyDex: opportunity.buyDex ?? "uniswap_v3",
-      sellDex: opportunity.sellDex ?? "sushiswap",
+      buyDex: opportunity.buyDex ?? "biswap",
+      sellDex: opportunity.sellDex ?? "babyswap",
       flashLoanAmount: opportunity.amountIn ?? "10000",
       flashbotsEnabled,
     });
   } else {
     result = await simulateArbitrage({
       tokenPair: opportunity.tokenPair,
-      buyDex: opportunity.buyDex ?? "uniswap_v3",
-      sellDex: opportunity.sellDex ?? "sushiswap",
+      buyDex: opportunity.buyDex ?? "biswap",
+      sellDex: opportunity.sellDex ?? "babyswap",
       profitEstimate: opportunity.profitEstimate ?? "0",
       gasEstimate: opportunity.gasEstimate ?? "0",
       netProfit: opportunity.netProfit ?? "0",
