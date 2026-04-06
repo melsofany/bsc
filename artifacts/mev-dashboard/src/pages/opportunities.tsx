@@ -202,10 +202,12 @@ export default function Opportunities() {
                         </Badge>
                       </TableCell>
                       <TableCell>
-                        <div className="flex items-center gap-1 text-xs text-muted-foreground whitespace-nowrap">
-                          <span>{op.buyDex || '—'}</span>
-                          <ArrowRight className="h-3 w-3 shrink-0" />
-                          <span>{op.sellDex || '—'}</span>
+                        <div className="flex items-center gap-1 text-xs whitespace-nowrap">
+                          <span className="text-green-500/70 font-mono font-bold">S</span>
+                          <span className="text-muted-foreground">{op.buyDex || '—'}</span>
+                          <ArrowRight className="h-3 w-3 shrink-0 text-muted-foreground/50" />
+                          <span className="text-blue-400/70 font-mono font-bold">B</span>
+                          <span className="text-muted-foreground">{op.sellDex || '—'}</span>
                         </div>
                       </TableCell>
                       <TableCell className="font-mono text-right text-xs whitespace-nowrap text-muted-foreground">
@@ -214,7 +216,7 @@ export default function Opportunities() {
                       <TableCell className="font-mono text-right text-xs whitespace-nowrap text-green-400/80">
                         {formatPrice(op.buyPrice)}
                       </TableCell>
-                      <TableCell className="font-mono text-right text-xs whitespace-nowrap text-red-400/80">
+                      <TableCell className="font-mono text-right text-xs whitespace-nowrap text-blue-400/80">
                         {formatPrice(op.sellPrice)}
                       </TableCell>
                       <TableCell className="font-mono text-right text-xs whitespace-nowrap text-muted-foreground">
