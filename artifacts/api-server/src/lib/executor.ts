@@ -118,6 +118,28 @@ async function getV2ForkPair(
   }
 }
 
+// Returns the token-A reserve for a V2 fork pair, or 0n if no pair / error.
+// Used to filter out DEXes with insufficient liquidity before execution.
+async function getV2ForkReserveA(
+  provider: ethers.Provider,
+  factoryAddress: string,
+  tokenA: string,
+  tokenB: string,
+): Promise<bigint> {
+  try {
+    const factory = new ethers.Contract(factoryAddress, PANCAKE_FACTORY_ABI, provider);
+    const pairAddr: string = await factory.getPair(tokenA, tokenB);
+    if (!pairAddr || pairAddr === ethers.ZeroAddress) return 0n;
+    const pair = new ethers.Contract(pairAddr, PANCAKE_PAIR_ABI, provider);
+    const [r0, r1] = await pair.getReserves();
+    const t0: string = await pair.token0();
+    const isAFirst = t0.toLowerCase() === tokenA.toLowerCase();
+    return isAFirst ? BigInt(r0) : BigInt(r1);
+  } catch {
+    return 0n;
+  }
+}
+
 // PancakeSwap V2 storage layout: unlocked is at slot 12.
 // All V2 forks (BiSwap, ApeSwap, BabySwap) copy-paste PancakeSwap's code so they
 // use the same layout — and the same "Pancake: LOCKED" error message.
@@ -136,6 +158,19 @@ const DEX_FACTORY_BSC: Record<string, string> = {
   apeswap:  APESWAP_FACTORY_BSC,
   babyswap: "0x86407bEa2078ea5f5EB5A52B2caA963bC1F889Da",
 };
+
+// Minimum token-A reserve (in token's native units, 18 decimals assumed) required
+// before we consider a DEX eligible for a buy or sell leg. Prevents routing through
+// near-empty pairs that produce empty reverts (`rawData=0x`) due to PancakeSwap/BiSwap
+// internal assertions failing with no error data.
+//
+// $1 000 USD equivalent at rough prices:
+//   WBNB ~$600  → 1.7 WBNB  → keep threshold at 5 WBNB
+//   BTCB ~$85k  → 0.012 BTCB → keep threshold at 0.05 BTCB
+//   ETH  ~$2k   → 0.5 ETH   → keep threshold at 2 ETH
+//   CAKE ~$1.5  → 670 CAKE  → keep threshold at 100 CAKE
+//   (18-decimal units throughout)
+const MIN_RESERVE_18 = ethers.parseEther("0.05"); // 0.05 base-token units (covers all pairs above)
 
 // ─── Calldata builders for the BUY leg only ───────────────────────────────
 // The sell leg calldata is built inside the contract (it needs the on-chain balance).
@@ -315,12 +350,6 @@ export async function executeArbitrageLive(params: {
     // reentrancy lock stays engaged for the ENTIRE flash callback duration.
     // Any leg that routes through the same PancakeSwap V2 pair will revert.
     //
-    // Root cause of "Pre-flight simulation failed: Pancake: LOCKED":
-    //   pancakeswap_v3 (SwapRouter 0x1b81...) is also UNSAFE inside a V2 flash
-    //   callback. On BSC, PancakeSwap V3's SwapRouter can internally route through
-    //   V2 pair contracts (shared pool registry) when no adequate V3 pool exists at
-    //   the requested fee tier. This re-enters the locked V2 pair → "Pancake: LOCKED".
-    //
     // Protocols that must NOT be used inside the flash-swap callback:
     //   pancakeswap_v2  → shares pair contracts with the flash loan source → LOCKED
     //   pancakeswap_v3  → may fall back to V2 pair routing on BSC → LOCKED
@@ -333,31 +362,68 @@ export async function executeArbitrageLive(params: {
       "uniswap_v3", "sushiswap",
       "mdex", "knightswap", "waultswap", "nomiswap",
     ]);
-    // Safe alternatives: independent V2 AMM forks with their own factory/pair contracts.
-    // These do NOT share pair addresses with PancakeSwap V2, so the V2 flash-swap
-    // reentrancy lock never affects them.
-    //   biswap   → high BSC liquidity, own factory 0x858E...
-    //   apeswap  → active BSC DEX, own factory 0x0841...
-    //   babyswap → BSC native, own factory
-    const SAFE_ALTERNATIVES = ["biswap", "apeswap", "babyswap"];
 
-    function promoteDex(dexKey: string, role: "buy" | "sell", exclude?: string): string {
-      // Keep the DEX unchanged only when it is safe AND doesn't duplicate the other leg.
-      // Previously the exclude check was missing, so "biswap" (safe) passed through even
-      // when the buy leg had already been promoted to "biswap" — causing buy === sell.
-      if (!UNSAFE_PROTOCOLS.has(dexKey) && dexKey !== exclude) return dexKey;
-      // Pick the first available safe alternative that is neither unsafe nor the other leg's DEX
-      const alt = SAFE_ALTERNATIVES.find(k => k !== exclude && networkDexes[k]);
-      if (alt) return alt;
+    // Safe alternatives ordered by typical BSC liquidity depth.
+    // biswap   → strongest liquidity (WBNB/USDT: 344 WBNB, BTCB/USDT: 0.53 BTCB)
+    // babyswap → good liquidity (WBNB/USDT: 152 WBNB, CAKE/USDT: 4120 CAKE)
+    // apeswap  → last resort (most pairs have <3 WBNB or ~0 BTCB/ETH liquidity)
+    const SAFE_ALTERNATIVES = ["biswap", "babyswap", "apeswap"];
+
+    // ── Liquidity-aware DEX promotion ────────────────────────────────────────
+    // Selects the first safe DEX whose tokenA reserve ≥ minReserve (2× the loan
+    // amount). Prevents routing through near-empty pairs that produce `rawData=0x`
+    // empty reverts because V2 AMM internal math fails with no error message.
+    async function promoteDexWithLiquidity(
+      dexKey: string,
+      role: "buy" | "sell",
+      tokenA: string,
+      tokenB: string,
+      minReserve: bigint,
+      exclude?: string,
+    ): Promise<string> {
+      // Ordered candidate list: original dex first (if safe + not excluded), then safe alternatives
+      const candidates: string[] = [];
+      if (!UNSAFE_PROTOCOLS.has(dexKey) && dexKey !== exclude) candidates.push(dexKey);
+      for (const alt of SAFE_ALTERNATIVES) {
+        if (alt !== exclude && !candidates.includes(alt)) candidates.push(alt);
+      }
+
+      for (const key of candidates) {
+        if (!networkDexes[key]) continue;
+        const factory = DEX_FACTORY_BSC[key];
+        if (!factory) continue;
+
+        let reserveA: bigint;
+        try {
+          reserveA = await getV2ForkReserveA(provider, factory, tokenA, tokenB);
+        } catch {
+          reserveA = 0n;
+        }
+
+        const hasLiquidity = reserveA >= minReserve;
+        console.log(`[executor] ${role} DEX candidate "${key}": reserve=${ethers.formatUnits(reserveA, tokenAInfo.decimals)} minRequired=${ethers.formatUnits(minReserve, tokenAInfo.decimals)} ok=${hasLiquidity}`);
+        if (hasLiquidity) return key;
+      }
+
+      // Absolute fallback — callStatic will still reject unprofitable trades
+      const fallback = candidates.find(k => networkDexes[k]);
+      if (fallback) {
+        console.warn(`[executor] ${role} no DEX with sufficient liquidity for this pair — falling back to "${fallback}" (callStatic will validate)`);
+        return fallback;
+      }
       throw new Error(
         `${role === "buy" ? "Buy" : "Sell"} DEX "${dexKey}" is unavailable on BSC ` +
-        `— no safe alternative router found. Check DEX_ROUTERS config.`
+        `— no safe alternative router found.`
       );
     }
 
-    const effectiveBuyDexKey  = promoteDex(buyDexKey,  "buy");
+    // Require each leg's DEX to hold at least 2× the loan amount in tokenA reserves.
+    // 2× gives a safety margin so our swap doesn't consume > 50% of the pool's depth.
+    const minReserve = loanAmount * 2n;
+
+    const effectiveBuyDexKey  = await promoteDexWithLiquidity(buyDexKey,  "buy",  tokenAInfo.address, tokenBInfo.address, minReserve);
     // Pass effectiveBuyDexKey as the exclude so sell never resolves to the same DEX
-    const effectiveSellDexKey = promoteDex(sellDexKey, "sell", effectiveBuyDexKey);
+    const effectiveSellDexKey = await promoteDexWithLiquidity(sellDexKey, "sell", tokenAInfo.address, tokenBInfo.address, minReserve, effectiveBuyDexKey);
     console.log(`[executor] dex: buy=${buyDexKey}→${effectiveBuyDexKey} sell=${sellDexKey}→${effectiveSellDexKey}`);
 
     if (effectiveBuyDexKey === effectiveSellDexKey) {
@@ -383,7 +449,7 @@ export async function executeArbitrageLive(params: {
 
     const feeData  = await provider.getFeeData();
     const gasPrice = feeData.gasPrice ?? ethers.parseUnits("5", "gwei");
-    const gasLimit = 600_000n;   // slightly higher for V3 sell path
+    const gasLimit = 900_000n;   // generous limit: flash swap + two V2 swaps + approvals ≈ 350–500k; OOG gives rawData=0x
 
     const nonce    = ethers.hexlify(ethers.randomBytes(32));
     const deadline = Math.floor(Date.now() / 1000) + 300;
