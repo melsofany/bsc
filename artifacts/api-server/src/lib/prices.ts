@@ -230,34 +230,35 @@ export function detectArbitrageFromPairs(
         const priceDiff = buyPrice - sellPrice; // always positive
         const diffPct = (priceDiff / sellPrice) * 100;
 
-        // Minimum spread needed to cover all fees:
-        //   flash loan fee: 0.25%
-        //   buy DEX swap fee: ~0.25–0.35%  (use 0.3% conservative)
-        //   sell DEX swap fee: ~0.25–0.35% (use 0.3% conservative)
-        //   total: ~0.85% — require 1.0% to have meaningful margin
-        if (diffPct < 1.0 || diffPct > 10) continue;
+        // Show opportunities with spread above noise floor (0.3%).
+        // Break-even requires ~0.85% (flash 0.25% + buy 0.3% + sell 0.3%).
+        // We detect at 0.3% so near-break-even trades are visible — the
+        // on-chain callStatic simulation acts as the final profitability gate.
+        if (diffPct < 0.3 || diffPct > 10) continue;
 
-        const FLASH_FEE    = 0.0025; // PancakeSwap flash loan
-        const DEX_FEE_EACH = 0.003;  // per swap leg (conservative)
+        const FLASH_FEE    = 0.0025; // PancakeSwap flash loan fee
+        const DEX_FEE_EACH = 0.003;  // per swap leg (conservative, covers 0.1–0.35%)
         const totalFeeRate = FLASH_FEE + DEX_FEE_EACH * 2; // 0.85%
 
         const maxLiquidity = Math.min(a.liquidity, b.liquidity);
         const tradeAmountUsd = Math.min(maxLiquidity * 0.02, 100000);
         const tokenAmount = tradeAmountUsd / buyPrice;
 
-        // Gross profit (buyPrice > sellPrice → positive)
+        // Gross profit before fees (buyPrice > sellPrice → always positive)
         const rawProfitUsd = tokenAmount * (buyPrice - sellPrice);
-        // Subtract fee cost from the loan amount
-        const feesCostUsd  = tradeAmountUsd * totalFeeRate;
+        // Fee-adjusted profit (may be negative for sub-break-even spreads)
+        const feesCostUsd      = tradeAmountUsd * totalFeeRate;
+        const profitAfterDexFees = rawProfitUsd - feesCostUsd;
 
         const strategy: "cross_dex" | "flash_loan" =
           tradeAmountUsd > 20000 ? "flash_loan" : "cross_dex";
 
         const gasEstimateUsd = strategy === "flash_loan" ? gasCostFlashLoan : gasCostCrossDex;
-        const profitAfterDexFees = rawProfitUsd - feesCostUsd;
         const netProfitUsd = profitAfterDexFees - gasEstimateUsd;
 
-        if (netProfitUsd < 1.0) continue;
+        // Require at least a meaningful gross profit ($0.50) to avoid noise.
+        // The on-chain simulation will reject truly unprofitable trades.
+        if (rawProfitUsd < 0.5) continue;
 
         const quoteToken = ["USDT", "BUSD", "USDC"].includes(token) ? "WBNB" : "USDT";
         const tokenPairLabel = `${token}/${quoteToken}`;

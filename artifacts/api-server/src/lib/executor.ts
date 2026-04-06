@@ -373,6 +373,7 @@ export async function executeArbitrageLive(params: {
     // Selects the first safe DEX whose tokenA reserve ≥ minReserve (2× the loan
     // amount). Prevents routing through near-empty pairs that produce `rawData=0x`
     // empty reverts because V2 AMM internal math fails with no error message.
+    // Returns the selected DEX key (or null if no candidate has sufficient liquidity)
     async function promoteDexWithLiquidity(
       dexKey: string,
       role: "buy" | "sell",
@@ -380,7 +381,7 @@ export async function executeArbitrageLive(params: {
       tokenB: string,
       minReserve: bigint,
       exclude?: string,
-    ): Promise<string> {
+    ): Promise<string | null> {
       // Ordered candidate list: original dex first (if safe + not excluded), then safe alternatives
       const candidates: string[] = [];
       if (!UNSAFE_PROTOCOLS.has(dexKey) && dexKey !== exclude) candidates.push(dexKey);
@@ -405,16 +406,9 @@ export async function executeArbitrageLive(params: {
         if (hasLiquidity) return key;
       }
 
-      // Absolute fallback — callStatic will still reject unprofitable trades
-      const fallback = candidates.find(k => networkDexes[k]);
-      if (fallback) {
-        console.warn(`[executor] ${role} no DEX with sufficient liquidity for this pair — falling back to "${fallback}" (callStatic will validate)`);
-        return fallback;
-      }
-      throw new Error(
-        `${role === "buy" ? "Buy" : "Sell"} DEX "${dexKey}" is unavailable on BSC ` +
-        `— no safe alternative router found.`
-      );
+      // No DEX with sufficient liquidity found
+      console.warn(`[executor] ${role} no DEX with sufficient liquidity for ${tokenA}/${tokenB} — skipping trade`);
+      return null;
     }
 
     // Require each leg's DEX to hold at least 2× the loan amount in tokenA reserves.
@@ -422,8 +416,23 @@ export async function executeArbitrageLive(params: {
     const minReserve = loanAmount * 2n;
 
     const effectiveBuyDexKey  = await promoteDexWithLiquidity(buyDexKey,  "buy",  tokenAInfo.address, tokenBInfo.address, minReserve);
+    if (!effectiveBuyDexKey) {
+      return {
+        success: false,
+        error: `Insufficient liquidity on all BSC DEXes for the buy leg of ${tokenA}/${tokenB}. Try a smaller flash loan amount.`,
+        simulated: false,
+      };
+    }
+
     // Pass effectiveBuyDexKey as the exclude so sell never resolves to the same DEX
     const effectiveSellDexKey = await promoteDexWithLiquidity(sellDexKey, "sell", tokenAInfo.address, tokenBInfo.address, minReserve, effectiveBuyDexKey);
+    if (!effectiveSellDexKey) {
+      return {
+        success: false,
+        error: `Insufficient liquidity on all BSC DEXes for the sell leg of ${tokenA}/${tokenB}. Try a smaller flash loan amount.`,
+        simulated: false,
+      };
+    }
     console.log(`[executor] dex: buy=${buyDexKey}→${effectiveBuyDexKey} sell=${sellDexKey}→${effectiveSellDexKey}`);
 
     if (effectiveBuyDexKey === effectiveSellDexKey) {
