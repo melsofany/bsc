@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "MEV Arbitrage Dashboard"
+version = "1.0.0"
+id = "artifacts/mev-dashboard"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23376
+
+[services.development]
+run = "pnpm --filter @workspace/mev-dashboard run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/mev-dashboard", "run", "build" ]
+publicDir = "artifacts/mev-dashboard/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23376"
+BASE_PATH = "/"

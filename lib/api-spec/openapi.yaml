@@ -1,0 +1,788 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: MEV Arbitrage Bot API
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: bot
+    description: Bot control
+  - name: opportunities
+    description: Arbitrage opportunities
+  - name: trades
+    description: Trade history
+  - name: analytics
+    description: Analytics and stats
+  - name: config
+    description: Bot configuration
+  - name: wallet
+    description: Wallet management
+  - name: execute
+    description: Trade execution
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /bot/status:
+    get:
+      operationId: getBotStatus
+      tags: [bot]
+      summary: Get bot status
+      responses:
+        "200":
+          description: Bot status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /bot/start:
+    post:
+      operationId: startBot
+      tags: [bot]
+      summary: Start the bot
+      responses:
+        "200":
+          description: Bot started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /bot/stop:
+    post:
+      operationId: stopBot
+      tags: [bot]
+      summary: Stop the bot
+      responses:
+        "200":
+          description: Bot stopped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+
+  /opportunities:
+    get:
+      operationId: listOpportunities
+      tags: [opportunities]
+      summary: List recent arbitrage opportunities
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [detected, executed, missed, failed]
+        - name: strategy
+          in: query
+          schema:
+            type: string
+            enum: [cross_dex, triangular, sandwich, flash_loan]
+      responses:
+        "200":
+          description: List of opportunities
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Opportunity"
+
+  /opportunities/live:
+    get:
+      operationId: getLiveOpportunities
+      tags: [opportunities]
+      summary: Get current live opportunities being tracked
+      responses:
+        "200":
+          description: Live opportunities
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Opportunity"
+
+  /trades:
+    get:
+      operationId: listTrades
+      tags: [trades]
+      summary: List executed trades
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, confirmed, failed, reverted]
+      responses:
+        "200":
+          description: List of trades
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Trade"
+
+  /trades/{id}:
+    get:
+      operationId: getTrade
+      tags: [trades]
+      summary: Get trade details
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Trade details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Trade"
+
+  /analytics/summary:
+    get:
+      operationId: getAnalyticsSummary
+      tags: [analytics]
+      summary: Get analytics summary (PnL, success rate, total trades)
+      responses:
+        "200":
+          description: Analytics summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsSummary"
+
+  /analytics/pnl:
+    get:
+      operationId: getPnlHistory
+      tags: [analytics]
+      summary: Get PnL history over time
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [1h, 6h, 24h, 7d, 30d]
+            default: 24h
+      responses:
+        "200":
+          description: PnL data points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PnlDataPoint"
+
+  /analytics/strategies:
+    get:
+      operationId: getStrategyStats
+      tags: [analytics]
+      summary: Get performance breakdown by strategy
+      responses:
+        "200":
+          description: Strategy statistics
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/StrategyStats"
+
+  /analytics/gas:
+    get:
+      operationId: getGasStats
+      tags: [analytics]
+      summary: Get gas usage statistics
+      responses:
+        "200":
+          description: Gas stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GasStats"
+
+  /config:
+    get:
+      operationId: getConfig
+      tags: [config]
+      summary: Get bot configuration
+      responses:
+        "200":
+          description: Bot configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotConfig"
+
+    put:
+      operationId: updateConfig
+      tags: [config]
+      summary: Update bot configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateBotConfigBody"
+      responses:
+        "200":
+          description: Updated configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotConfig"
+
+  /mempool/stats:
+    get:
+      operationId: getMempoolStats
+      tags: [analytics]
+      summary: Get mempool monitoring statistics
+      responses:
+        "200":
+          description: Mempool stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MempoolStats"
+
+  /wallet/status:
+    get:
+      operationId: getWalletStatus
+      tags: [wallet]
+      summary: Get connected wallet status
+      responses:
+        "200":
+          description: Wallet status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletStatus"
+
+  /wallet/connect:
+    post:
+      operationId: connectWallet
+      tags: [wallet]
+      summary: Connect a wallet using private key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConnectWalletBody"
+      responses:
+        "200":
+          description: Wallet connected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletStatus"
+        "400":
+          description: Invalid private key or connection error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /wallet/disconnect:
+    post:
+      operationId: disconnectWallet
+      tags: [wallet]
+      summary: Disconnect the current wallet
+      responses:
+        "200":
+          description: Wallet disconnected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletStatus"
+
+  /execute/{opportunityId}:
+    post:
+      operationId: executeOpportunity
+      tags: [execute]
+      summary: Execute an arbitrage opportunity
+      parameters:
+        - name: opportunityId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Execution result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionResult"
+        "400":
+          description: Execution error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required: [status]
+
+    BotStatus:
+      type: object
+      properties:
+        running:
+          type: boolean
+        uptime:
+          type: integer
+          description: Uptime in seconds
+        network:
+          type: string
+        walletAddress:
+          type: string
+        walletBalance:
+          type: string
+          description: Balance in ETH/MATIC
+        pendingTxCount:
+          type: integer
+        blockNumber:
+          type: integer
+        gasPrice:
+          type: string
+          description: Current gas price in Gwei
+        mode:
+          type: string
+          enum: [simulation, live]
+        connectedToNode:
+          type: boolean
+        flashbotsEnabled:
+          type: boolean
+      required:
+        - running
+        - network
+        - mode
+        - connectedToNode
+        - flashbotsEnabled
+
+    Opportunity:
+      type: object
+      properties:
+        id:
+          type: integer
+        strategy:
+          type: string
+          enum: [cross_dex, triangular, sandwich, flash_loan]
+        tokenPair:
+          type: string
+        buyDex:
+          type: string
+        sellDex:
+          type: string
+        buyPrice:
+          type: string
+        sellPrice:
+          type: string
+        profitEstimate:
+          type: string
+          description: Estimated profit in USD
+        profitPercent:
+          type: string
+        gasEstimate:
+          type: string
+          description: Estimated gas cost in USD
+        netProfit:
+          type: string
+        status:
+          type: string
+          enum: [detected, executed, missed, failed]
+        detectedAt:
+          type: string
+          format: date-time
+        executedAt:
+          type: string
+          format: date-time
+        txHash:
+          type: string
+        amountIn:
+          type: string
+        flashLoanUsed:
+          type: boolean
+        slippage:
+          type: string
+      required:
+        - id
+        - strategy
+        - tokenPair
+        - profitEstimate
+        - status
+        - detectedAt
+
+    Trade:
+      type: object
+      properties:
+        id:
+          type: integer
+        opportunityId:
+          type: integer
+        txHash:
+          type: string
+        strategy:
+          type: string
+        tokenPair:
+          type: string
+        amountIn:
+          type: string
+        amountOut:
+          type: string
+        profit:
+          type: string
+        profitUsd:
+          type: string
+        gasUsed:
+          type: string
+        gasCost:
+          type: string
+        gasCostUsd:
+          type: string
+        netProfitUsd:
+          type: string
+        status:
+          type: string
+          enum: [pending, confirmed, failed, reverted]
+        blockNumber:
+          type: integer
+        executedAt:
+          type: string
+          format: date-time
+        confirmedAt:
+          type: string
+          format: date-time
+        flashLoanAmount:
+          type: string
+        flashLoanFee:
+          type: string
+        buyDex:
+          type: string
+        sellDex:
+          type: string
+        error:
+          type: string
+      required:
+        - id
+        - strategy
+        - tokenPair
+        - status
+        - executedAt
+
+    AnalyticsSummary:
+      type: object
+      properties:
+        totalProfit:
+          type: string
+          description: Total profit in USD
+        totalProfitEth:
+          type: string
+        totalTrades:
+          type: integer
+        successfulTrades:
+          type: integer
+        failedTrades:
+          type: integer
+        successRate:
+          type: string
+        totalGasSpent:
+          type: string
+        avgProfitPerTrade:
+          type: string
+        bestTrade:
+          type: string
+        opportunitiesDetected:
+          type: integer
+        opportunitiesExecuted:
+          type: integer
+        executionRate:
+          type: string
+        totalVolumeUsd:
+          type: string
+        profitToday:
+          type: string
+        profitThisWeek:
+          type: string
+      required:
+        - totalProfit
+        - totalTrades
+        - successRate
+
+    PnlDataPoint:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        cumulativePnl:
+          type: string
+        periodPnl:
+          type: string
+        tradesCount:
+          type: integer
+      required:
+        - timestamp
+        - cumulativePnl
+        - periodPnl
+        - tradesCount
+
+    StrategyStats:
+      type: object
+      properties:
+        strategy:
+          type: string
+        totalTrades:
+          type: integer
+        successRate:
+          type: string
+        totalProfit:
+          type: string
+        avgProfit:
+          type: string
+        avgGasCost:
+          type: string
+      required:
+        - strategy
+        - totalTrades
+        - successRate
+        - totalProfit
+
+    GasStats:
+      type: object
+      properties:
+        currentGasPrice:
+          type: string
+        avgGasPrice24h:
+          type: string
+        totalGasSpent:
+          type: string
+        totalGasSpentUsd:
+          type: string
+        avgGasPerTrade:
+          type: string
+      required:
+        - currentGasPrice
+        - totalGasSpent
+
+    BotConfig:
+      type: object
+      properties:
+        id:
+          type: integer
+        network:
+          type: string
+          enum: [polygon, bsc, ethereum, arbitrum, bsc_testnet]
+        mode:
+          type: string
+          enum: [simulation, live]
+        contractAddress:
+          type: string
+        minProfitThresholdUsd:
+          type: string
+        maxGasPriceGwei:
+          type: string
+        slippageTolerance:
+          type: string
+        flashbotsEnabled:
+          type: boolean
+        flashLoanEnabled:
+          type: boolean
+        flashLoanProvider:
+          type: string
+          enum: [pancakeswap, pancakeswap_v3, uniswap_v3]
+        strategies:
+          type: array
+          items:
+            type: string
+            enum: [cross_dex, triangular, sandwich, flash_loan]
+        dexList:
+          type: array
+          items:
+            type: string
+        tokenWatchlist:
+          type: array
+          items:
+            type: string
+        maxPositionSizeUsd:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - network
+        - mode
+        - minProfitThresholdUsd
+        - maxGasPriceGwei
+        - flashbotsEnabled
+        - flashLoanEnabled
+        - strategies
+
+    UpdateBotConfigBody:
+      type: object
+      properties:
+        network:
+          type: string
+          enum: [polygon, bsc, ethereum, arbitrum, bsc_testnet]
+        mode:
+          type: string
+          enum: [simulation, live]
+        contractAddress:
+          type: string
+        minProfitThresholdUsd:
+          type: string
+        maxGasPriceGwei:
+          type: string
+        slippageTolerance:
+          type: string
+        flashbotsEnabled:
+          type: boolean
+        flashLoanEnabled:
+          type: boolean
+        flashLoanProvider:
+          type: string
+          enum: [pancakeswap, pancakeswap_v3, uniswap_v3]
+        strategies:
+          type: array
+          items:
+            type: string
+        dexList:
+          type: array
+          items:
+            type: string
+        tokenWatchlist:
+          type: array
+          items:
+            type: string
+        maxPositionSizeUsd:
+          type: string
+
+    MempoolStats:
+      type: object
+      properties:
+        pendingTxCount:
+          type: integer
+        swapTxDetected:
+          type: integer
+        largeSwapsDetected:
+          type: integer
+        avgProcessingTimeMs:
+          type: integer
+        blocksProcessed:
+          type: integer
+        lastBlockNumber:
+          type: integer
+        lastBlockTime:
+          type: string
+          format: date-time
+      required:
+        - pendingTxCount
+        - swapTxDetected
+        - blocksProcessed
+
+    WalletStatus:
+      type: object
+      properties:
+        connected:
+          type: boolean
+        address:
+          type: string
+        balance:
+          type: string
+          description: ETH/MATIC balance
+        network:
+          type: string
+        contractAddress:
+          type: string
+        contractValid:
+          type: boolean
+        contractOwner:
+          type: string
+      required:
+        - connected
+
+    ConnectWalletBody:
+      type: object
+      properties:
+        privateKey:
+          type: string
+          description: Ethereum private key (hex)
+        contractAddress:
+          type: string
+          description: Deployed FlashLoanArbitrage contract address
+      required:
+        - privateKey
+
+    ExecutionResult:
+      type: object
+      properties:
+        success:
+          type: boolean
+        txHash:
+          type: string
+        blockNumber:
+          type: integer
+        gasUsed:
+          type: string
+        gasCostEth:
+          type: string
+        gasCostUsd:
+          type: string
+        profitEth:
+          type: string
+        profitUsd:
+          type: string
+        error:
+          type: string
+        simulated:
+          type: boolean
+        opportunityId:
+          type: integer
+      required:
+        - success
+        - simulated
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
